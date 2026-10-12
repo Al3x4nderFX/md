@@ -20,13 +20,14 @@
 		},
 		"bar-scale": {
 			"type": "float",
-			"name": "Tamaño de la barra",
+			"name": "Zoom de la barra",
 			"default": 1.0,
 			"min": 0.5,
-			"max": 2.0,
+			"max": 3.0,
 			"control": {
 				"slider": true
-			}
+			},
+			"description": "Acerca o aleja las barras (como un zoom) sin mover los botones ni cambiar el espacio que ocupan."
 		}
 	}
 }
