@@ -1,148 +1,159 @@
 #include <Geode/Geode.hpp>
-#include <Geode/modify/EditorUI.hpp>
+#include <Geode/modify/EditLevelLayer.hpp>
+#include <Geode/modify/PlayLayer.hpp>
 
 using namespace geode::prelude;
 
 // ---------------------------------------------------------------
-// Nodo de la barra: dos filas (normal = verde, práctica = azul)
+// Utilidades de guardado (un valor por nivel: normal y práctica)
 // ---------------------------------------------------------------
-class EditorProgressBar : public CCNode {
-protected:
-    LevelEditorLayer* m_lel = nullptr;
-    CCLayerColor* m_normalFill = nullptr;
-    CCLayerColor* m_practiceFill = nullptr;
-    CCLabelBMFont* m_label = nullptr;
+static std::string progressKey(GJGameLevel* level, bool practice) {
+    return fmt::format(
+        "lvl_{}_{}_{}",
+        level->m_levelID.value(),
+        std::string(level->m_levelName),
+        practice ? "p" : "n"
+    );
+}
 
-    std::string m_key;
-    float m_normal = 0.f;
-    float m_practice = 0.f;
-    bool m_wasPlaying = false;
-    bool m_dirty = false;
+static int loadProgress(GJGameLevel* level, bool practice) {
+    return Mod::get()->getSavedValue<int>(progressKey(level, practice), 0);
+}
 
-    static constexpr float W = 180.f;
-    static constexpr float H = 5.f;
+static void storeProgress(GJGameLevel* level, bool practice, int pct) {
+    auto key = progressKey(level, practice);
+    auto mod = Mod::get();
+    if (pct > mod->getSavedValue<int>(key, 0)) {
+        mod->setSavedValue<int>(key, std::clamp(pct, 0, 100));
+    }
+}
 
-    static std::string makeKey(GJGameLevel* level) {
-        return fmt::format("{}_{}", level->m_levelID.value(), std::string(level->m_levelName));
+// ---------------------------------------------------------------
+// Una barra con los assets originales del juego
+// (la misma textura que usan las barras de niveles online)
+// ---------------------------------------------------------------
+static CCNode* makeGameBar(int pct, ccColor3B color) {
+    auto node = CCNode::create();
+    node->setAnchorPoint({0.5f, 0.5f});
+
+    // Fondo: textura original de la barra, oscura y semitransparente
+    auto back = CCSprite::create("GJ_progressBar_001.png");
+    if (!back) return node;
+    back->setColor({0, 0, 0});
+    back->setOpacity(125);
+
+    auto size = back->getContentSize();
+    node->setContentSize(size);
+    back->setPosition({size.width / 2.f, size.height / 2.f});
+    node->addChild(back, 1);
+
+    // Relleno: la misma textura, coloreada y recortada según el porcentaje
+    if (pct > 0) {
+        auto fill = CCSprite::create("GJ_progressBar_001.png");
+        if (fill) {
+            fill->setColor(color);
+            fill->setScaleX(0.992f);
+            fill->setScaleY(0.86f);
+            fill->setAnchorPoint({0.f, 0.5f});
+            fill->setPosition({size.width * (1.f - 0.992f) / 2.f, size.height / 2.f});
+
+            // setTextureRect usa píxeles, así que se multiplica por el factor de contenido
+            float f = CCDirector::get()->getContentScaleFactor();
+            fill->setTextureRect(CCRect(0.f, 0.f, size.width * f * pct / 100.f, size.height * f));
+            node->addChild(fill, 2);
+        }
     }
 
-    bool init(LevelEditorLayer* lel) {
-        if (!CCNode::init()) return false;
-        m_lel = lel;
-        m_key = makeKey(lel->m_level);
+    // Porcentaje con la fuente original del juego
+    if (Mod::get()->getSettingValue<bool>("show-text")) {
+        auto label = CCLabelBMFont::create(fmt::format("{}%", pct).c_str(), "bigFont.fnt");
+        label->setScale(0.5f);
+        label->setPosition({size.width / 2.f, size.height / 2.f});
+        node->addChild(label, 3);
+    }
 
-        // Cargar lo guardado
-        auto mod = Mod::get();
-        m_normal = static_cast<float>(mod->getSavedValue<int>(m_key + "_n", 0));
-        m_practice = static_cast<float>(mod->getSavedValue<int>(m_key + "_p", 0));
+    return node;
+}
 
-        this->setContentSize({W, H * 2 + 4.f});
-        this->setAnchorPoint({0.5f, 0.5f});
+// Dos barras apiladas: normal (verde) y práctica (azul)
+static CCNode* buildProgressBar(int normal, int practice) {
+    auto normalBar = makeGameBar(normal, {0, 255, 0});
+    auto practiceBar = makeGameBar(practice, {0, 255, 255});
 
-        auto bg = CCLayerColor::create({0, 0, 0, 140}, W + 4.f, H * 2 + 6.f);
-        bg->setPosition({-2.f, -3.f});
-        this->addChild(bg, 0);
+    auto size = normalBar->getContentSize();
+    constexpr float gap = 4.f;
 
-        auto normalBack = CCLayerColor::create({60, 60, 60, 200}, W, H);
-        normalBack->setPosition({0.f, H + 1.f});
-        this->addChild(normalBack, 1);
+    auto root = CCNode::create();
+    root->setAnchorPoint({0.5f, 0.5f});
+    root->setContentSize({size.width, size.height * 2.f + gap});
 
-        auto practiceBack = CCLayerColor::create({60, 60, 60, 200}, W, H);
-        practiceBack->setPosition({0.f, 0.f});
-        this->addChild(practiceBack, 1);
+    normalBar->setPosition({size.width / 2.f, size.height * 1.5f + gap});
+    practiceBar->setPosition({size.width / 2.f, size.height / 2.f});
+    root->addChild(normalBar);
+    root->addChild(practiceBar);
+    return root;
+}
 
-        m_normalFill = CCLayerColor::create({0, 255, 0, 255}, 0.f, H);
-        m_normalFill->setPosition({0.f, H + 1.f});
-        this->addChild(m_normalFill, 2);
+// ---------------------------------------------------------------
+// Pantalla del nivel (editar / jugar / compartir): mostrar la barra
+// ---------------------------------------------------------------
+class $modify(ProgressEditLevelLayer, EditLevelLayer) {
+    bool init(GJGameLevel* level) {
+        if (!EditLevelLayer::init(level)) return false;
 
-        m_practiceFill = CCLayerColor::create({0, 200, 255, 255}, 0.f, H);
-        m_practiceFill->setPosition({0.f, 0.f});
-        this->addChild(m_practiceFill, 2);
+        auto winSize = CCDirector::get()->getWinSize();
+        auto bar = buildProgressBar(loadProgress(level, false), loadProgress(level, true));
+        bar->setID("progress-bar"_spr);
 
-        m_label = CCLabelBMFont::create("", "bigFont.fnt");
-        m_label->setScale(0.28f);
-        m_label->setAnchorPoint({0.f, 0.5f});
-        m_label->setPosition({W + 6.f, H + 0.5f});
-        this->addChild(m_label, 3);
+        // Ancho base ~150 unidades, ajustable con el ajuste "Tamaño de la barra"
+        float userScale = static_cast<float>(Mod::get()->getSettingValue<double>("bar-scale"));
+        float width = std::max(bar->getContentSize().width, 1.f);
+        bar->setScale(userScale * 150.f / width);
 
-        this->refresh();
-        this->schedule(schedule_selector(EditorProgressBar::tick));
+        // Justo debajo de los 3 botones (editar / jugar / compartir)
+        bar->setPosition({winSize.width / 2.f, winSize.height * 0.26f});
+        this->addChild(bar, 10);
+
         return true;
-    }
-
-    void refresh() {
-        m_normalFill->setContentSize({W * m_normal / 100.f, H});
-        m_practiceFill->setContentSize({W * m_practice / 100.f, H});
-        m_label->setVisible(Mod::get()->getSettingValue<bool>("show-text"));
-        m_label->setString(
-            fmt::format("{}% / {}%", static_cast<int>(m_normal), static_cast<int>(m_practice)).c_str()
-        );
-    }
-
-    void save() {
-        auto mod = Mod::get();
-        mod->setSavedValue<int>(m_key + "_n", static_cast<int>(m_normal));
-        mod->setSavedValue<int>(m_key + "_p", static_cast<int>(m_practice));
-        m_dirty = false;
-    }
-
-    void tick(float) {
-        if (!m_lel) return;
-
-        bool playing = m_lel->m_playbackMode == PlaybackMode::Playing;
-
-        if (playing && m_lel->m_player1) {
-            float len = m_lel->getLastObjectX();
-            if (len < 1.f) len = 1.f;
-            float pct = std::clamp(m_lel->m_player1->getPositionX() / len * 100.f, 0.f, 100.f);
-
-            float& target = m_lel->m_isPracticeMode ? m_practice : m_normal;
-            if (pct > target) {
-                target = pct;
-                m_dirty = true;
-                this->refresh();
-            }
-        }
-
-        // Al salir del playtest, guardar
-        if (m_wasPlaying && !playing && m_dirty) this->save();
-        m_wasPlaying = playing;
-    }
-
-public:
-    static EditorProgressBar* create(LevelEditorLayer* lel) {
-        auto ret = new EditorProgressBar();
-        if (ret->init(lel)) {
-            ret->autorelease();
-            return ret;
-        }
-        delete ret;
-        return nullptr;
-    }
-
-    void onExit() override {
-        if (m_dirty) this->save();
-        CCNode::onExit();
     }
 };
 
 // ---------------------------------------------------------------
-// Hook: añadir la barra al editor
+// Al jugar el nivel: guardar el mejor porcentaje (normal / práctica)
 // ---------------------------------------------------------------
-class $modify(ProgressEditorUI, EditorUI) {
-    bool init(LevelEditorLayer* lel) {
-        if (!EditorUI::init(lel)) return false;
+class $modify(ProgressPlayLayer, PlayLayer) {
+    struct Fields {
+        int m_lastPct = -1;
+        bool m_lastPractice = false;
+    };
 
-        auto winSize = CCDirector::get()->getWinSize();
-        auto bar = EditorProgressBar::create(lel);
-        if (bar) {
-            bar->setID("progress-bar"_spr);
-            bar->setScale(
-                static_cast<float>(Mod::get()->getSettingValue<double>("bar-scale"))
-            );
-            bar->setPosition({winSize.width / 2.f - 20.f, winSize.height - 16.f});
-            this->addChild(bar, 100);
+    bool isLocalLevel() {
+        return m_level && m_level->m_levelType == GJLevelType::Editor;
+    }
+
+    void updateProgressbar() {
+        PlayLayer::updateProgressbar();
+        if (!this->isLocalLevel()) return;
+
+        int pct = std::clamp(static_cast<int>(this->getCurrentPercent()), 0, 100);
+        bool practice = m_isPracticeMode;
+
+        if (pct != m_fields->m_lastPct || practice != m_fields->m_lastPractice) {
+            m_fields->m_lastPct = pct;
+            m_fields->m_lastPractice = practice;
+            storeProgress(m_level, practice, pct);
         }
-        return true;
+    }
+
+    void levelComplete() {
+        PlayLayer::levelComplete();
+        if (!this->isLocalLevel()) return;
+        storeProgress(m_level, m_isPracticeMode, 100);
+        (void) Mod::get()->saveData();
+    }
+
+    void onQuit() {
+        PlayLayer::onQuit();
+        if (this->isLocalLevel()) (void) Mod::get()->saveData();
     }
 };
