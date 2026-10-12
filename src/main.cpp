@@ -5,7 +5,9 @@
 using namespace geode::prelude;
 
 // ---------------------------------------------------------------
-// Utilidades de guardado (un valor por nivel: normal y práctica)
+// Guardado / lectura de progreso
+// Se combina el porcentaje REAL que ya guarda el juego en el nivel
+// (m_normalPercent / m_practicePercent) con el que guarda este mod.
 // ---------------------------------------------------------------
 static std::string progressKey(GJGameLevel* level, bool practice) {
     return fmt::format(
@@ -17,7 +19,11 @@ static std::string progressKey(GJGameLevel* level, bool practice) {
 }
 
 static int loadProgress(GJGameLevel* level, bool practice) {
-    return Mod::get()->getSavedValue<int>(progressKey(level, practice), 0);
+    int saved = Mod::get()->getSavedValue<int>(progressKey(level, practice), 0);
+    int game = practice
+        ? static_cast<int>(level->m_practicePercent)
+        : static_cast<int>(level->m_normalPercent.value());
+    return std::clamp(std::max(saved, game), 0, 100);
 }
 
 static void storeProgress(GJGameLevel* level, bool practice, int pct) {
@@ -29,73 +35,82 @@ static void storeProgress(GJGameLevel* level, bool practice, int pct) {
 }
 
 // ---------------------------------------------------------------
-// Una barra con los assets originales del juego
-// (la misma textura que usan las barras de niveles online)
+// Una fila: título a la izquierda + barra (assets originales del juego:
+// GJ_progressBar_001.png y bigFont.fnt). Las posiciones son relativas
+// a la esquina inferior izquierda de "root".
 // ---------------------------------------------------------------
-static CCNode* makeGameBar(int pct, ccColor3B color) {
-    auto node = CCNode::create();
-    node->setAnchorPoint({0.5f, 0.5f});
+static void addRow(
+    CCNode* root, const char* title, int pct, ccColor3B color,
+    CCSize barSize, float barLeft, float y, float labelRight
+) {
+    float midY = y + barSize.height / 2.f;
+    float barMidX = barLeft + barSize.width / 2.f;
 
-    // Fondo: textura original de la barra, oscura y semitransparente
+    // Título ("Normal Mode" / "Practice Mode"), alineado a la derecha, pegado a la barra
+    auto titleLabel = CCLabelBMFont::create(title, "bigFont.fnt");
+    titleLabel->setScale(0.5f);
+    titleLabel->setAnchorPoint({1.f, 0.5f});
+    titleLabel->setPosition({labelRight, midY});
+    root->addChild(titleLabel, 3);
+
+    // Fondo de la barra: textura original, oscura y semitransparente
     auto back = CCSprite::create("GJ_progressBar_001.png");
-    if (!back) return node;
-    back->setColor({0, 0, 0});
-    back->setOpacity(125);
+    if (back) {
+        back->setColor({0, 0, 0});
+        back->setOpacity(125);
+        back->setPosition({barMidX, midY});
+        root->addChild(back, 1);
+    }
 
-    auto size = back->getContentSize();
-    node->setContentSize(size);
-    back->setPosition({size.width / 2.f, size.height / 2.f});
-    node->addChild(back, 1);
-
-    // Relleno: la misma textura, coloreada y recortada según el porcentaje
+    // Relleno: misma textura, coloreada y recortada según el porcentaje.
+    // OJO: setTextureRect usa PUNTOS (igual que getContentSize), no píxeles.
     if (pct > 0) {
         auto fill = CCSprite::create("GJ_progressBar_001.png");
         if (fill) {
             fill->setColor(color);
+            fill->setAnchorPoint({0.f, 0.5f});
+            fill->setTextureRect(CCRect(0.f, 0.f, barSize.width * pct / 100.f, barSize.height));
             fill->setScaleX(0.992f);
             fill->setScaleY(0.86f);
-            fill->setAnchorPoint({0.f, 0.5f});
-            fill->setPosition({size.width * (1.f - 0.992f) / 2.f, size.height / 2.f});
-
-            // setTextureRect usa píxeles, así que se multiplica por el factor de contenido
-            float f = CCDirector::get()->getContentScaleFactor();
-            fill->setTextureRect(CCRect(0.f, 0.f, size.width * f * pct / 100.f, size.height * f));
-            node->addChild(fill, 2);
+            fill->setPosition({barLeft + barSize.width * (1.f - 0.992f) / 2.f, midY});
+            root->addChild(fill, 2);
         }
     }
 
-    // Porcentaje con la fuente original del juego
+    // Porcentaje centrado dentro de la barra
     if (Mod::get()->getSettingValue<bool>("show-text")) {
-        auto label = CCLabelBMFont::create(fmt::format("{}%", pct).c_str(), "bigFont.fnt");
-        label->setScale(0.5f);
-        label->setPosition({size.width / 2.f, size.height / 2.f});
-        node->addChild(label, 3);
+        auto percent = CCLabelBMFont::create(fmt::format("{}%", pct).c_str(), "bigFont.fnt");
+        percent->setScale(0.5f);
+        percent->setPosition({barMidX, midY});
+        root->addChild(percent, 4);
     }
-
-    return node;
 }
 
-// Dos barras apiladas: normal (verde) y práctica (azul)
+// Dos filas apiladas: Normal Mode (arriba) y Practice Mode (abajo)
 static CCNode* buildProgressBar(int normal, int practice) {
-    auto normalBar = makeGameBar(normal, {0, 255, 0});
-    auto practiceBar = makeGameBar(practice, {0, 255, 255});
+    auto probe = CCSprite::create("GJ_progressBar_001.png");
+    CCSize barSize = probe ? probe->getContentSize() : CCSize(220.f, 20.f);
 
-    auto size = normalBar->getContentSize();
-    constexpr float gap = 4.f;
+    // Ancho del título más largo para alinear ambas barras
+    auto t1 = CCLabelBMFont::create("Normal Mode", "bigFont.fnt");
+    auto t2 = CCLabelBMFont::create("Practice Mode", "bigFont.fnt");
+    float labelW = std::max(t1->getContentSize().width, t2->getContentSize().width) * 0.5f;
+
+    constexpr float labelGap = 8.f;
+    constexpr float rowGap = 4.f;
+    float barLeft = labelW + labelGap;
 
     auto root = CCNode::create();
     root->setAnchorPoint({0.5f, 0.5f});
-    root->setContentSize({size.width, size.height * 2.f + gap});
+    root->setContentSize({barLeft + barSize.width, barSize.height * 2.f + rowGap});
 
-    normalBar->setPosition({size.width / 2.f, size.height * 1.5f + gap});
-    practiceBar->setPosition({size.width / 2.f, size.height / 2.f});
-    root->addChild(normalBar);
-    root->addChild(practiceBar);
+    addRow(root, "Normal Mode", normal, {0, 255, 0}, barSize, barLeft, barSize.height + rowGap, labelW);
+    addRow(root, "Practice Mode", practice, {0, 255, 255}, barSize, barLeft, 0.f, labelW);
     return root;
 }
 
 // ---------------------------------------------------------------
-// Pantalla del nivel (editar / jugar / compartir): mostrar la barra
+// Pantalla del nivel (editar / jugar / compartir): mostrar las barras
 // ---------------------------------------------------------------
 class $modify(ProgressEditLevelLayer, EditLevelLayer) {
     bool init(GJGameLevel* level) {
@@ -105,12 +120,11 @@ class $modify(ProgressEditLevelLayer, EditLevelLayer) {
         auto bar = buildProgressBar(loadProgress(level, false), loadProgress(level, true));
         bar->setID("progress-bar"_spr);
 
-        // Ancho base ~150 unidades, ajustable con el ajuste "Tamaño de la barra"
         float userScale = static_cast<float>(Mod::get()->getSettingValue<double>("bar-scale"));
         float width = std::max(bar->getContentSize().width, 1.f);
-        bar->setScale(userScale * 150.f / width);
+        bar->setScale(userScale * 270.f / width); // ancho total ~270 unidades
 
-        // Justo debajo de los 3 botones (editar / jugar / compartir)
+        // Posición original: centrado, justo debajo de los 3 botones
         bar->setPosition({winSize.width / 2.f, winSize.height * 0.26f});
         this->addChild(bar, 10);
 
