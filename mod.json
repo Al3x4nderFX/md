@@ -1,0 +1,32 @@
+{
+	"geode": "5.7.1",
+	"gd": {
+		"win": "2.2081",
+		"android": "2.2081",
+		"mac": "2.2081",
+		"ios": "2.2081"
+	},
+	"id": "tuusuario.editor-progress-bar",
+	"name": "Editor Progress Bar",
+	"version": "v1.0.0",
+	"developer": "TuUsuario",
+	"description": "Barra de progreso (normal y práctica) dentro del editor.",
+	"settings": {
+		"show-text": {
+			"type": "bool",
+			"name": "Mostrar porcentajes",
+			"description": "Muestra el texto con los porcentajes junto a la barra.",
+			"default": true
+		},
+		"bar-scale": {
+			"type": "float",
+			"name": "Tamaño de la barra",
+			"default": 1.0,
+			"min": 0.5,
+			"max": 2.0,
+			"control": {
+				"slider": true
+			}
+		}
+	}
+}
