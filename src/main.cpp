@@ -35,35 +35,31 @@ static void storeProgress(GJGameLevel* level, bool practice, int pct) {
 }
 
 // ---------------------------------------------------------------
-// Una fila: título a la izquierda + barra (assets originales del juego:
+// Una fila: título encima + barra (assets originales del juego:
 // GJ_progressBar_001.png y bigFont.fnt). Las posiciones son relativas
-// a la esquina inferior izquierda de "root".
+// a la esquina inferior izquierda de "root"; "y" es la base de la fila.
 // ---------------------------------------------------------------
+static constexpr float TITLE_SCALE = 0.4f;
+static constexpr float TITLE_GAP = 2.f;
+
 static void addRow(
     CCNode* root, const char* title, int pct, ccColor3B color,
-    CCSize barSize, float barLeft, float y, float labelRight
+    CCSize barSize, float y, float titleH
 ) {
-    float midY = y + barSize.height / 2.f;
-    float barMidX = barLeft + barSize.width / 2.f;
-
-    // Título ("Normal Mode" / "Practice Mode"), alineado a la derecha, pegado a la barra
-    auto titleLabel = CCLabelBMFont::create(title, "bigFont.fnt");
-    titleLabel->setScale(0.5f);
-    titleLabel->setAnchorPoint({1.f, 0.5f});
-    titleLabel->setPosition({labelRight, midY});
-    root->addChild(titleLabel, 3);
+    float midX = barSize.width / 2.f;
+    float barMidY = y + barSize.height / 2.f;
 
     // Fondo de la barra: textura original, oscura y semitransparente
     auto back = CCSprite::create("GJ_progressBar_001.png");
     if (back) {
         back->setColor({0, 0, 0});
         back->setOpacity(125);
-        back->setPosition({barMidX, midY});
+        back->setPosition({midX, barMidY});
         root->addChild(back, 1);
     }
 
     // Relleno: misma textura, coloreada y recortada según el porcentaje.
-    // OJO: setTextureRect usa PUNTOS (igual que getContentSize), no píxeles.
+    // setTextureRect usa PUNTOS (igual que getContentSize).
     if (pct > 0) {
         auto fill = CCSprite::create("GJ_progressBar_001.png");
         if (fill) {
@@ -72,7 +68,7 @@ static void addRow(
             fill->setTextureRect(CCRect(0.f, 0.f, barSize.width * pct / 100.f, barSize.height));
             fill->setScaleX(0.992f);
             fill->setScaleY(0.86f);
-            fill->setPosition({barLeft + barSize.width * (1.f - 0.992f) / 2.f, midY});
+            fill->setPosition({barSize.width * (1.f - 0.992f) / 2.f, barMidY});
             root->addChild(fill, 2);
         }
     }
@@ -80,10 +76,16 @@ static void addRow(
     // Porcentaje centrado dentro de la barra
     if (Mod::get()->getSettingValue<bool>("show-text")) {
         auto percent = CCLabelBMFont::create(fmt::format("{}%", pct).c_str(), "bigFont.fnt");
-        percent->setScale(0.5f);
-        percent->setPosition({barMidX, midY});
+        percent->setScale(0.45f);
+        percent->setPosition({midX, barMidY});
         root->addChild(percent, 4);
     }
+
+    // Título encima de la barra
+    auto titleLabel = CCLabelBMFont::create(title, "bigFont.fnt");
+    titleLabel->setScale(TITLE_SCALE);
+    titleLabel->setPosition({midX, y + barSize.height + TITLE_GAP + titleH / 2.f});
+    root->addChild(titleLabel, 3);
 }
 
 // Dos filas apiladas: Normal Mode (arriba) y Practice Mode (abajo)
@@ -91,41 +93,95 @@ static CCNode* buildProgressBar(int normal, int practice) {
     auto probe = CCSprite::create("GJ_progressBar_001.png");
     CCSize barSize = probe ? probe->getContentSize() : CCSize(220.f, 20.f);
 
-    // Ancho del título más largo para alinear ambas barras
-    auto t1 = CCLabelBMFont::create("Normal Mode", "bigFont.fnt");
-    auto t2 = CCLabelBMFont::create("Practice Mode", "bigFont.fnt");
-    float labelW = std::max(t1->getContentSize().width, t2->getContentSize().width) * 0.5f;
+    auto probeLabel = CCLabelBMFont::create("Normal Mode", "bigFont.fnt");
+    float titleH = probeLabel->getContentSize().height * TITLE_SCALE;
 
-    constexpr float labelGap = 8.f;
-    constexpr float rowGap = 4.f;
-    float barLeft = labelW + labelGap;
+    constexpr float rowGap = 5.f;
+    float rowH = barSize.height + TITLE_GAP + titleH;
 
     auto root = CCNode::create();
     root->setAnchorPoint({0.5f, 0.5f});
-    root->setContentSize({barLeft + barSize.width, barSize.height * 2.f + rowGap});
+    root->setContentSize({barSize.width, rowH * 2.f + rowGap});
 
-    addRow(root, "Normal Mode", normal, {0, 255, 0}, barSize, barLeft, barSize.height + rowGap, labelW);
-    addRow(root, "Practice Mode", practice, {0, 255, 255}, barSize, barLeft, 0.f, labelW);
+    addRow(root, "Normal Mode", normal, {0, 255, 0}, barSize, rowH + rowGap, titleH);
+    addRow(root, "Practice Mode", practice, {0, 255, 255}, barSize, 0.f, titleH);
     return root;
 }
 
 // ---------------------------------------------------------------
-// Pantalla del nivel (editar / jugar / compartir): mostrar las barras
+// Busca los botones grandes (editar / jugar / compartir) sin depender de IDs
+// ---------------------------------------------------------------
+static void collectButtons(CCNode* node, std::vector<CCNode*>& out) {
+    auto children = node->getChildren();
+    if (!children) return;
+    for (auto child : CCArrayExt<CCNode*>(children)) {
+        if (typeinfo_cast<CCMenuItemSpriteExtra*>(child)) {
+            out.push_back(child);
+        } else {
+            collectButtons(child, out);
+        }
+    }
+}
+
+// ---------------------------------------------------------------
+// Pantalla del nivel (editar / jugar / compartir)
 // ---------------------------------------------------------------
 class $modify(ProgressEditLevelLayer, EditLevelLayer) {
     bool init(GJGameLevel* level) {
         if (!EditLevelLayer::init(level)) return false;
 
         auto winSize = CCDirector::get()->getWinSize();
+        float cx = winSize.width / 2.f;
+
+        // 1) Bajar los 3 botones grandes para hacer espacio arriba
+        float shift = winSize.height * 0.10f;
+        float buttonsTop = winSize.height * 0.40f; // valor por defecto si no se encuentran
+
+        std::vector<CCNode*> all;
+        collectButtons(this, all);
+
+        bool moved = false;
+        float topMost = 0.f;
+        for (auto btn : all) {
+            auto parent = btn->getParent();
+            if (!parent) continue;
+
+            auto wp = parent->convertToWorldSpace(btn->getPosition());
+            auto lp = this->convertToNodeSpace(wp);
+
+            // Fila central de botones: ni la carpeta, ni los de los lados
+            bool inRow = lp.y > winSize.height * 0.30f && lp.y < winSize.height * 0.58f;
+            bool inCenter = std::abs(lp.x - cx) < winSize.width * 0.25f;
+            if (!inRow || !inCenter) continue;
+
+            auto p0 = parent->convertToNodeSpace(wp);
+            auto p1 = parent->convertToNodeSpace(wp + CCPoint(0.f, -shift));
+            btn->setPosition(btn->getPosition() + (p1 - p0));
+
+            // Parte superior del botón, ya movido (en coordenadas de esta capa)
+            auto box = btn->boundingBox();
+            auto top = this->convertToNodeSpace(
+                parent->convertToWorldSpace(CCPoint(box.getMidX(), box.getMaxY()))
+            );
+            topMost = moved ? std::max(topMost, top.y) : top.y;
+            moved = true;
+        }
+        if (moved) buttonsTop = topMost;
+
+        // 2) Crear las barras y colocarlas en el hueco entre la descripción y los botones
         auto bar = buildProgressBar(loadProgress(level, false), loadProgress(level, true));
         bar->setID("progress-bar"_spr);
 
-        float userScale = static_cast<float>(Mod::get()->getSettingValue<double>("bar-scale"));
-        float width = std::max(bar->getContentSize().width, 1.f);
-        bar->setScale(userScale * 270.f / width); // ancho total ~270 unidades
+        float topLimit = winSize.height * 0.60f;   // justo debajo del cuadro de descripción
+        float bottomLimit = buttonsTop + 3.f;      // justo encima de los botones
+        float available = std::max(topLimit - bottomLimit, 10.f);
 
-        // Posición original: centrado, justo debajo de los 3 botones
-        bar->setPosition({winSize.width / 2.f, winSize.height * 0.26f});
+        float userScale = static_cast<float>(Mod::get()->getSettingValue<double>("bar-scale"));
+        float nativeH = std::max(bar->getContentSize().height, 1.f);
+        float scale = std::min(0.85f * userScale, available / nativeH); // nunca invade botones ni descripción
+        bar->setScale(scale);
+
+        bar->setPosition({cx, (topLimit + bottomLimit) / 2.f});
         this->addChild(bar, 10);
 
         return true;
