@@ -109,18 +109,40 @@ static CCNode* buildProgressBar(int normal, int practice) {
 }
 
 // ---------------------------------------------------------------
-// Busca los botones grandes (editar / jugar / compartir) sin depender de IDs
+// Recoge todos los elementos "hoja" de la pantalla (botones, sprites,
+// textos) sin depender de IDs. No entra dentro de botones/sprites/textos.
 // ---------------------------------------------------------------
-static void collectButtons(CCNode* node, std::vector<CCNode*>& out) {
+static void collectLeaves(CCNode* node, std::vector<CCNode*>& out) {
     auto children = node->getChildren();
     if (!children) return;
     for (auto child : CCArrayExt<CCNode*>(children)) {
-        if (typeinfo_cast<CCMenuItemSpriteExtra*>(child)) {
-            out.push_back(child);
-        } else {
-            collectButtons(child, out);
-        }
+        if (!child->isVisible()) continue;
+        bool leaf =
+            typeinfo_cast<CCMenuItem*>(child) ||
+            typeinfo_cast<CCSprite*>(child) ||
+            typeinfo_cast<CCLabelBMFont*>(child) ||
+            typeinfo_cast<CCLabelTTF*>(child);
+        if (leaf) out.push_back(child);
+        else collectLeaves(child, out);
     }
+}
+
+// Posición del centro del elemento en coordenadas de la capa
+static CCPoint centerInLayer(CCNode* layer, CCNode* n) {
+    auto parent = n->getParent();
+    auto box = n->boundingBox();
+    return layer->convertToNodeSpace(
+        parent->convertToWorldSpace(CCPoint(box.getMidX(), box.getMidY()))
+    );
+}
+
+// Mueve un elemento "dy" unidades en coordenadas de la capa
+static void moveInLayer(CCNode* layer, CCNode* n, float dy) {
+    auto parent = n->getParent();
+    auto wp = parent->convertToWorldSpace(n->getPosition());
+    auto lp = layer->convertToNodeSpace(wp);
+    auto target = parent->convertToNodeSpace(layer->convertToWorldSpace(lp + CCPoint(0.f, dy)));
+    n->setPosition(target);
 }
 
 // ---------------------------------------------------------------
@@ -133,42 +155,50 @@ class $modify(ProgressEditLevelLayer, EditLevelLayer) {
         auto winSize = CCDirector::get()->getWinSize();
         float cx = winSize.width / 2.f;
 
-        // 1) Bajar los 3 botones grandes para hacer espacio arriba
-        float shift = winSize.height * 0.10f;
-        float buttonsTop = winSize.height * 0.40f; // valor por defecto si no se encuentran
+        float buttonsShift = -winSize.height * 0.10f; // botones grandes: bajan 10%
+        float infoShift = -winSize.height * 0.06f;    // fila reloj / música / Unverified: baja 6%
 
-        std::vector<CCNode*> all;
-        collectButtons(this, all);
+        std::vector<CCNode*> leaves;
+        collectLeaves(this, leaves);
 
-        bool moved = false;
-        float topMost = 0.f;
-        for (auto btn : all) {
-            auto parent = btn->getParent();
-            if (!parent) continue;
+        // Primero se calculan las posiciones, luego se mueve (para no alterar el criterio)
+        std::vector<CCNode*> bigButtons;
+        std::vector<CCNode*> infoRow;
+        for (auto n : leaves) {
+            if (!n->getParent()) continue;
+            auto c = centerInLayer(this, n);
+            float xr = c.x / winSize.width;
+            float yr = c.y / winSize.height;
 
-            auto wp = parent->convertToWorldSpace(btn->getPosition());
-            auto lp = this->convertToNodeSpace(wp);
-
-            // Fila central de botones: ni la carpeta, ni los de los lados
-            bool inRow = lp.y > winSize.height * 0.30f && lp.y < winSize.height * 0.58f;
-            bool inCenter = std::abs(lp.x - cx) < winSize.width * 0.25f;
-            if (!inRow || !inCenter) continue;
-
-            auto p0 = parent->convertToNodeSpace(wp);
-            auto p1 = parent->convertToNodeSpace(wp + CCPoint(0.f, -shift));
-            btn->setPosition(btn->getPosition() + (p1 - p0));
-
-            // Parte superior del botón, ya movido (en coordenadas de esta capa)
-            auto box = btn->boundingBox();
-            auto top = this->convertToNodeSpace(
-                parent->convertToWorldSpace(CCPoint(box.getMidX(), box.getMaxY()))
-            );
-            topMost = moved ? std::max(topMost, top.y) : top.y;
-            moved = true;
+            // Botones grandes: parte central, altura media
+            if (typeinfo_cast<CCMenuItem*>(n) &&
+                std::abs(c.x - cx) < winSize.width * 0.25f &&
+                yr > 0.30f && yr < 0.58f) {
+                bigButtons.push_back(n);
+            }
+            // Fila de información: reloj + "Long", música, info + "Unverified / Req. Coins"
+            else if (xr > 0.20f && xr < 0.85f && yr > 0.10f && yr < 0.27f) {
+                infoRow.push_back(n);
+            }
         }
-        if (moved) buttonsTop = topMost;
 
-        // 2) Crear las barras y colocarlas en el hueco entre la descripción y los botones
+        float buttonsTop = winSize.height * 0.40f; // valor por defecto si no se encuentran
+        bool any = false;
+        float topMost = 0.f;
+        for (auto n : bigButtons) {
+            moveInLayer(this, n, buttonsShift);
+            auto box = n->boundingBox();
+            auto top = this->convertToNodeSpace(
+                n->getParent()->convertToWorldSpace(CCPoint(box.getMidX(), box.getMaxY()))
+            );
+            topMost = any ? std::max(topMost, top.y) : top.y;
+            any = true;
+        }
+        if (any) buttonsTop = topMost;
+
+        for (auto n : infoRow) moveInLayer(this, n, infoShift);
+
+        // Barras: se calculan para el hueco disponible
         auto bar = buildProgressBar(loadProgress(level, false), loadProgress(level, true));
         bar->setID("progress-bar"_spr);
 
@@ -176,10 +206,14 @@ class $modify(ProgressEditLevelLayer, EditLevelLayer) {
         float bottomLimit = buttonsTop + 3.f;      // justo encima de los botones
         float available = std::max(topLimit - bottomLimit, 10.f);
 
-        float userScale = static_cast<float>(Mod::get()->getSettingValue<double>("bar-scale"));
+        // Escala base: la que cabe exactamente en el hueco (esto NO cambia con el ajuste)
         float nativeH = std::max(bar->getContentSize().height, 1.f);
-        float scale = std::min(0.85f * userScale, available / nativeH); // nunca invade botones ni descripción
-        bar->setScale(scale);
+        float baseScale = std::min(1.0f, available / nativeH);
+
+        // "Tamaño de la barra" = zoom: agranda/achica desde el centro del hueco,
+        // sin mover nada más ni cambiar el espacio reservado.
+        float zoom = static_cast<float>(Mod::get()->getSettingValue<double>("bar-scale"));
+        bar->setScale(baseScale * zoom);
 
         bar->setPosition({cx, (topLimit + bottomLimit) / 2.f});
         this->addChild(bar, 10);
